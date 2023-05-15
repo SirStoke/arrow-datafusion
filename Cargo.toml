@@ -29,7 +29,6 @@ members = [
     "datafusion/row",
     "datafusion/sql",
     "datafusion/substrait",
-    "datafusion-examples",
     "test-utils",
     "parquet-test-utils",
     "benchmarks",
@@ -46,10 +45,17 @@ repository = "https://github.com/apache/arrow-datafusion"
 rust-version = "1.64"
 
 [workspace.dependencies]
-arrow = { version = "34.0.0", features = ["prettyprint"] }
-arrow-buffer = "34.0.0"
-arrow-schema = "34.0.0"
-parquet = { version = "34.0.0", features = ["arrow", "async"] }
+arrow = { git = "https://github.com/SirStoke/arrow-rs.git", branch = "decimal-json-writer-34.0.0-wasm" }
+arrow-cast = { git = "https://github.com/SirStoke/arrow-rs.git", branch = "decimal-json-writer-34.0.0-wasm" }
+arrow-ipc = { git = "https://github.com/SirStoke/arrow-rs.git", branch = "decimal-json-writer-34.0.0-wasm" }
+arrow-schema = { git = "https://github.com/SirStoke/arrow-rs.git", branch = "decimal-json-writer-34.0.0-wasm" }
+arrow-buffer = { git = "https://github.com/SirStoke/arrow-rs.git", branch = "decimal-json-writer-34.0.0-wasm" }
+arrow-array = { git = "https://github.com/SirStoke/arrow-rs.git", branch = "decimal-json-writer-34.0.0-wasm" }
+arrow-select = { git = "https://github.com/SirStoke/arrow-rs.git", branch = "decimal-json-writer-34.0.0-wasm" }
+arrow-string = { git = "https://github.com/SirStoke/arrow-rs.git", branch = "decimal-json-writer-34.0.0-wasm" }
+arrow-row = { git = "https://github.com/SirStoke/arrow-rs.git", branch = "decimal-json-writer-34.0.0-wasm" }
+arrow-data = { git = "https://github.com/SirStoke/arrow-rs.git", branch = "decimal-json-writer-34.0.0-wasm" }
+parquet = { git = "https://github.com/SirStoke/arrow-rs.git", branch = "decimal-json-writer-34.0.0-wasm", features = ["arrow", "async", "object_store"] }
 
 [profile.release]
 codegen-units = 1
