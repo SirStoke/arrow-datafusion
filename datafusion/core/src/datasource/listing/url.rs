@@ -15,7 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::datasource::object_store::ObjectStoreUrl;
 use datafusion_common::{DataFusionError, Result};
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
@@ -75,40 +74,10 @@ impl ListingTableUrl {
     pub fn parse(s: impl AsRef<str>) -> Result<Self> {
         let s = s.as_ref();
 
-        // This is necessary to handle the case of a path starting with a drive letter
-        if std::path::Path::new(s).is_absolute() {
-            return Self::parse_path(s);
-        }
-
         match Url::parse(s) {
             Ok(url) => Ok(Self::new(url, None)),
-            Err(url::ParseError::RelativeUrlWithoutBase) => Self::parse_path(s),
             Err(e) => Err(DataFusionError::External(Box::new(e))),
         }
-    }
-
-    /// Creates a new [`ListingTableUrl`] interpreting `s` as a filesystem path
-    fn parse_path(s: &str) -> Result<Self> {
-        let (prefix, glob) = match split_glob_expression(s) {
-            Some((prefix, glob)) => {
-                let glob = Pattern::new(glob)
-                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                (prefix, Some(glob))
-            }
-            None => (s, None),
-        };
-
-        let path = std::path::Path::new(prefix).canonicalize()?;
-        let url = if path.is_dir() {
-            Url::from_directory_path(path)
-        } else {
-            Url::from_file_path(path)
-        }
-        .map_err(|_| DataFusionError::Internal(format!("Can not open path: {s}")))?;
-        // TODO: Currently we do not have an IO-related error variant that accepts ()
-        //       or a string. Once we have such a variant, change the error type above.
-
-        Ok(Self::new(url, glob))
     }
 
     /// Creates a new [`ListingTableUrl`] from a url and optional glob expression
@@ -177,12 +146,6 @@ impl ListingTableUrl {
     /// Returns this [`ListingTableUrl`] as a string
     pub fn as_str(&self) -> &str {
         self.as_ref()
-    }
-
-    /// Return the [`ObjectStoreUrl`] for this [`ListingTableUrl`]
-    pub fn object_store(&self) -> ObjectStoreUrl {
-        let url = &self.url[url::Position::BeforeScheme..url::Position::BeforePath];
-        ObjectStoreUrl::parse(url).unwrap()
     }
 }
 

@@ -26,9 +26,7 @@ use crate::{
 use datafusion_common::DataFusionError;
 use datafusion_execution::{
     memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool},
-    object_store::ObjectStoreRegistry,
 };
-use object_store::ObjectStore;
 use std::fmt::{Debug, Formatter};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -41,8 +39,6 @@ pub struct RuntimeEnv {
     pub memory_pool: Arc<dyn MemoryPool>,
     /// Manage temporary files during query execution
     pub disk_manager: Arc<DiskManager>,
-    /// Object Store Registry
-    pub object_store_registry: Arc<ObjectStoreRegistry>,
 }
 
 impl Debug for RuntimeEnv {
@@ -57,7 +53,6 @@ impl RuntimeEnv {
         let RuntimeConfig {
             memory_pool,
             disk_manager,
-            object_store_registry,
         } = config;
 
         let memory_pool =
@@ -66,36 +61,7 @@ impl RuntimeEnv {
         Ok(Self {
             memory_pool,
             disk_manager: DiskManager::try_new(disk_manager)?,
-            object_store_registry,
         })
-    }
-
-    /// Registers a custom `ObjectStore` to be used when accessing a
-    /// specific scheme and host. This allows DataFusion to create
-    /// external tables from urls that do not have built in support
-    /// such as `hdfs://...`.
-    ///
-    /// Returns the [`ObjectStore`] previously registered for this
-    /// scheme, if any.
-    ///
-    /// See [`ObjectStoreRegistry`] for more details
-    pub fn register_object_store(
-        &self,
-        scheme: impl AsRef<str>,
-        host: impl AsRef<str>,
-        object_store: Arc<dyn ObjectStore>,
-    ) -> Option<Arc<dyn ObjectStore>> {
-        self.object_store_registry
-            .register_store(scheme, host, object_store)
-    }
-
-    /// Retrieves a `ObjectStore` instance for a url by consulting the
-    /// registery. See [`ObjectStoreRegistry::get_by_url`] for more
-    /// details.
-    pub fn object_store(&self, url: impl AsRef<Url>) -> Result<Arc<dyn ObjectStore>> {
-        self.object_store_registry
-            .get_by_url(url)
-            .map_err(DataFusionError::from)
     }
 }
 
@@ -114,8 +80,6 @@ pub struct RuntimeConfig {
     ///
     /// Defaults to using an [`UnboundedMemoryPool`] if `None`
     pub memory_pool: Option<Arc<dyn MemoryPool>>,
-    /// ObjectStoreRegistry to get object store based on url
-    pub object_store_registry: Arc<ObjectStoreRegistry>,
 }
 
 impl RuntimeConfig {
@@ -133,15 +97,6 @@ impl RuntimeConfig {
     /// Customize memory policy
     pub fn with_memory_pool(mut self, memory_pool: Arc<dyn MemoryPool>) -> Self {
         self.memory_pool = Some(memory_pool);
-        self
-    }
-
-    /// Customize object store registry
-    pub fn with_object_store_registry(
-        mut self,
-        object_store_registry: Arc<ObjectStoreRegistry>,
-    ) -> Self {
-        self.object_store_registry = object_store_registry;
         self
     }
 

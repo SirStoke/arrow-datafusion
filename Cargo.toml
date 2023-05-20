@@ -45,7 +45,7 @@ repository = "https://github.com/apache/arrow-datafusion"
 rust-version = "1.64"
 
 [workspace.dependencies]
-arrow = { git = "https://github.com/SirStoke/arrow-rs.git", branch = "decimal-json-writer-34.0.0-wasm" }
+arrow = { git = "https://github.com/SirStoke/arrow-rs.git", branch = "decimal-json-writer-34.0.0-wasm", features = ["prettyprint"] }
 arrow-cast = { git = "https://github.com/SirStoke/arrow-rs.git", branch = "decimal-json-writer-34.0.0-wasm" }
 arrow-ipc = { git = "https://github.com/SirStoke/arrow-rs.git", branch = "decimal-json-writer-34.0.0-wasm" }
 arrow-schema = { git = "https://github.com/SirStoke/arrow-rs.git", branch = "decimal-json-writer-34.0.0-wasm" }

@@ -42,7 +42,6 @@
 
 pub mod context;
 // backwards compatibility
-pub use crate::datasource::file_format::options;
 pub mod runtime_env;
 
 // backwards compatibility

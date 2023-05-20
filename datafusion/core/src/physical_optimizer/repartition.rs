@@ -23,9 +23,9 @@ use crate::config::ConfigOptions;
 use crate::error::Result;
 use crate::physical_plan::Partitioning::*;
 use crate::physical_plan::{
-    file_format::ParquetExec, repartition::RepartitionExec,
     with_new_children_if_necessary, ExecutionPlan,
 };
+use crate::physical_plan::repartition::RepartitionExec;
 
 /// Optimizer that introduces repartition to introduce more
 /// parallelism in the plan
@@ -237,16 +237,6 @@ fn optimize_partitions(
     // If repartition is not allowed - return plan as it is
     if !repartition_allowed {
         return Ok(new_plan);
-    }
-
-    // For ParquetExec return internally repartitioned version of the plan in case `repartition_file_scans` is set
-    if let Some(parquet_exec) = new_plan.as_any().downcast_ref::<ParquetExec>() {
-        if repartition_file_scans {
-            return Ok(Arc::new(
-                parquet_exec
-                    .get_repartitioned(target_partitions, repartition_file_min_size),
-            ));
-        }
     }
 
     // Otherwise - return plan wrapped up in RepartitionExec

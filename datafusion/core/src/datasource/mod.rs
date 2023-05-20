@@ -21,15 +21,11 @@
 pub mod datasource;
 pub mod default_table_source;
 pub mod empty;
-pub mod file_format;
 pub mod listing;
-pub mod listing_table_factory;
 pub mod memory;
 pub mod streaming;
 pub mod view;
 
-// backwards compatibility
-pub use datafusion_execution::object_store;
 
 use futures::Stream;
 

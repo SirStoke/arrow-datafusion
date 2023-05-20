@@ -21,7 +21,6 @@
 #![allow(clippy::module_inception)]
 pub mod catalog;
 pub(crate) mod information_schema;
-pub mod listing_schema;
 pub mod schema;
 
 pub use datafusion_sql::{ResolvedTableReference, TableReference};

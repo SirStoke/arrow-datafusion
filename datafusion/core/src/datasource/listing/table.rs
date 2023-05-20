@@ -32,25 +32,19 @@ use futures::{future, stream, StreamExt, TryStreamExt};
 use object_store::path::Path;
 use object_store::ObjectMeta;
 
-use crate::datasource::file_format::file_type::{FileCompressionType, FileType};
 use crate::datasource::{
-    file_format::{
-        avro::AvroFormat, csv::CsvFormat, json::JsonFormat, parquet::ParquetFormat,
-        FileFormat,
-    },
     get_statistics_with_limit,
     listing::ListingTableUrl,
     TableProvider, TableType,
 };
 use crate::logical_expr::TableProviderFilterPushDown;
 use crate::physical_plan;
-use crate::physical_plan::file_format::partition_type_wrap;
 use crate::{
     error::{DataFusionError, Result},
     execution::context::SessionState,
     logical_expr::Expr,
     physical_plan::{
-        empty::EmptyExec, file_format::FileScanConfig, project_schema, ExecutionPlan,
+        empty::EmptyExec, project_schema, ExecutionPlan,
         Statistics,
     },
 };
@@ -114,67 +108,12 @@ impl ListingTableConfig {
         }
     }
 
-    fn infer_format(path: &str) -> Result<(Arc<dyn FileFormat>, String)> {
-        let err_msg = format!("Unable to infer file type from path: {path}");
-
-        let mut exts = path.rsplit('.');
-
-        let mut splitted = exts.next().unwrap_or("");
-
-        let file_compression_type = FileCompressionType::from_str(splitted)
-            .unwrap_or(FileCompressionType::UNCOMPRESSED);
-
-        if file_compression_type.is_compressed() {
-            splitted = exts.next().unwrap_or("");
-        }
-
-        let file_type = FileType::from_str(splitted)
-            .map_err(|_| DataFusionError::Internal(err_msg.to_owned()))?;
-
-        let ext = file_type
-            .get_ext_with_compression(file_compression_type.to_owned())
-            .map_err(|_| DataFusionError::Internal(err_msg))?;
-
-        let file_format: Arc<dyn FileFormat> = match file_type {
-            FileType::AVRO => Arc::new(AvroFormat::default()),
-            FileType::CSV => Arc::new(
-                CsvFormat::default().with_file_compression_type(file_compression_type),
-            ),
-            FileType::JSON => Arc::new(
-                JsonFormat::default().with_file_compression_type(file_compression_type),
-            ),
-            FileType::PARQUET => Arc::new(ParquetFormat::default()),
-        };
-
-        Ok((file_format, ext))
-    }
-
     /// Infer `ListingOptions` based on `table_path` suffix.
-    pub async fn infer_options(self, state: &SessionState) -> Result<Self> {
-        let store = state
-            .runtime_env()
-            .object_store(self.table_paths.get(0).unwrap())?;
-
-        let file = self
-            .table_paths
-            .get(0)
-            .unwrap()
-            .list_all_files(store.as_ref(), "")
-            .next()
-            .await
-            .ok_or_else(|| DataFusionError::Internal("No files for table".into()))??;
-
-        let (format, file_extension) =
-            ListingTableConfig::infer_format(file.location.as_ref())?;
-
-        let listing_options = ListingOptions::new(format)
-            .with_file_extension(file_extension)
-            .with_target_partitions(state.config().target_partitions());
-
+    pub async fn infer_options(self, _state: &SessionState) -> Result<Self> {
         Ok(Self {
             table_paths: self.table_paths,
             file_schema: self.file_schema,
-            options: Some(listing_options),
+            options: None,
         })
     }
 
@@ -182,13 +121,9 @@ impl ListingTableConfig {
     pub async fn infer_schema(self, state: &SessionState) -> Result<Self> {
         match self.options {
             Some(options) => {
-                let schema = options
-                    .infer_schema(state, self.table_paths.get(0).unwrap())
-                    .await?;
-
                 Ok(Self {
                     table_paths: self.table_paths,
-                    file_schema: Some(schema),
+                    file_schema: None,
                     options: Some(options),
                 })
             }
@@ -210,8 +145,6 @@ pub struct ListingOptions {
     /// A suffix on which files should be filtered (leave empty to
     /// keep all files on the path)
     pub file_extension: String,
-    /// The file format
-    pub format: Arc<dyn FileFormat>,
     /// The expected partition column names in the folder structure.
     /// For example `Vec["a", "b"]` means that the two first levels of
     /// partitioning expected should be named "a" and "b":
@@ -249,10 +182,9 @@ impl ListingOptions {
     /// - no input partition to discover
     /// - one target partition
     /// - stat collection
-    pub fn new(format: Arc<dyn FileFormat>) -> Self {
+    pub fn new() -> Self {
         Self {
             file_extension: String::new(),
-            format,
             table_partition_cols: vec![],
             collect_stat: true,
             target_partitions: 1,
@@ -382,27 +314,6 @@ impl ListingOptions {
         self.file_sort_order = file_sort_order;
         self
     }
-
-    /// Infer the schema of the files at the given path on the provided object store.
-    /// The inferred schema does not include the partitioning columns.
-    ///
-    /// This method will not be called by the table itself but before creating it.
-    /// This way when creating the logical plan we can decide to resolve the schema
-    /// locally or ask a remote service to do it (e.g a scheduler).
-    pub async fn infer_schema<'a>(
-        &'a self,
-        state: &SessionState,
-        table_path: &'a ListingTableUrl,
-    ) -> Result<SchemaRef> {
-        let store = state.runtime_env().object_store(table_path)?;
-
-        let files: Vec<_> = table_path
-            .list_all_files(store.as_ref(), &self.file_extension)
-            .try_collect()
-            .await?;
-
-        self.format.infer_schema(state, &store, &files).await
-    }
 }
 
 /// Collected statistics for files
@@ -515,7 +426,13 @@ pub struct ListingTable {
     infinite_source: bool,
 }
 
+/// Convert logical type of partition column to physical type: `Dictionary(UInt16, val_type)`
+pub fn partition_type_wrap(val_type: DataType) -> DataType {
+    DataType::Dictionary(Box::new(DataType::UInt16), Box::new(val_type))
+}
+
 impl ListingTable {
+
     /// Create new [`ListingTable`] that lists the FS to get the files
     /// to scan. See [`ListingTable`] for and example.
     ///
@@ -598,8 +515,7 @@ impl ListingTable {
                                 nulls_first: *nulls_first,
                             },
                         })
-                    }
-                    else {
+                    } else {
                         Err(DataFusionError::Plan(
                             format!("Only support single column references in output_ordering, got {expr:?}")
                         ))
@@ -616,179 +532,6 @@ impl ListingTable {
     }
 }
 
-#[async_trait]
-impl TableProvider for ListingTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn schema(&self) -> SchemaRef {
-        Arc::clone(&self.table_schema)
-    }
-
-    fn table_type(&self) -> TableType {
-        TableType::Base
-    }
-
-    async fn scan(
-        &self,
-        state: &SessionState,
-        projection: Option<&Vec<usize>>,
-        filters: &[Expr],
-        limit: Option<usize>,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        let (partitioned_file_lists, statistics) =
-            self.list_files_for_scan(state, filters, limit).await?;
-
-        // if no files need to be read, return an `EmptyExec`
-        if partitioned_file_lists.is_empty() {
-            let schema = self.schema();
-            let projected_schema = project_schema(&schema, projection)?;
-            return Ok(Arc::new(EmptyExec::new(false, projected_schema)));
-        }
-
-        // extract types of partition columns
-        let table_partition_cols = self
-            .options
-            .table_partition_cols
-            .iter()
-            .map(|col| {
-                Ok((
-                    col.0.to_owned(),
-                    self.table_schema
-                        .field_with_name(&col.0)?
-                        .data_type()
-                        .clone(),
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        let filters = if let Some(expr) = conjunction(filters.to_vec()) {
-            // NOTE: Use the table schema (NOT file schema) here because `expr` may contain references to partition columns.
-            let table_df_schema = self.table_schema.as_ref().clone().to_dfschema()?;
-            let filters = create_physical_expr(
-                &expr,
-                &table_df_schema,
-                &self.table_schema,
-                state.execution_props(),
-            )?;
-            Some(filters)
-        } else {
-            None
-        };
-
-        // create the execution plan
-        self.options
-            .format
-            .create_physical_plan(
-                state,
-                FileScanConfig {
-                    object_store_url: self.table_paths.get(0).unwrap().object_store(),
-                    file_schema: Arc::clone(&self.file_schema),
-                    file_groups: partitioned_file_lists,
-                    statistics,
-                    projection: projection.cloned(),
-                    limit,
-                    output_ordering: self.try_create_output_ordering()?,
-                    table_partition_cols,
-                    infinite_source: self.infinite_source,
-                },
-                filters.as_ref(),
-            )
-            .await
-    }
-
-    fn supports_filter_pushdown(
-        &self,
-        filter: &Expr,
-    ) -> Result<TableProviderFilterPushDown> {
-        if expr_applicable_for_cols(
-            &self
-                .options
-                .table_partition_cols
-                .iter()
-                .map(|x| x.0.clone())
-                .collect::<Vec<_>>(),
-            filter,
-        ) {
-            // if filter can be handled by partiton pruning, it is exact
-            Ok(TableProviderFilterPushDown::Exact)
-        } else {
-            // otherwise, we still might be able to handle the filter with file
-            // level mechanisms such as Parquet row group pruning.
-            Ok(TableProviderFilterPushDown::Inexact)
-        }
-    }
-
-    fn get_table_definition(&self) -> Option<&str> {
-        self.definition.as_deref()
-    }
-}
-
-impl ListingTable {
-    /// Get the list of files for a scan as well as the file level statistics.
-    /// The list is grouped to let the execution plan know how the files should
-    /// be distributed to different threads / executors.
-    async fn list_files_for_scan<'a>(
-        &'a self,
-        ctx: &'a SessionState,
-        filters: &'a [Expr],
-        limit: Option<usize>,
-    ) -> Result<(Vec<Vec<PartitionedFile>>, Statistics)> {
-        let store = ctx
-            .runtime_env()
-            .object_store(self.table_paths.get(0).unwrap())?;
-        // list files (with partitions)
-        let file_list = future::try_join_all(self.table_paths.iter().map(|table_path| {
-            pruned_partition_list(
-                store.as_ref(),
-                table_path,
-                filters,
-                &self.options.file_extension,
-                &self.options.table_partition_cols,
-            )
-        }))
-        .await?;
-
-        let file_list = stream::iter(file_list).flatten();
-
-        // collect the statistics if required by the config
-        let files = file_list.then(|part_file| async {
-            let part_file = part_file?;
-            let statistics = if self.options.collect_stat {
-                match self.collected_statistics.get(&part_file.object_meta) {
-                    Some(statistics) => statistics,
-                    None => {
-                        let statistics = self
-                            .options
-                            .format
-                            .infer_stats(
-                                ctx,
-                                &store,
-                                self.file_schema.clone(),
-                                &part_file.object_meta,
-                            )
-                            .await?;
-                        self.collected_statistics
-                            .save(part_file.object_meta.clone(), statistics.clone());
-                        statistics
-                    }
-                }
-            } else {
-                Statistics::default()
-            };
-            Ok((part_file, statistics)) as Result<(PartitionedFile, Statistics)>
-        });
-
-        let (files, statistics) =
-            get_statistics_with_limit(files, self.schema(), limit).await?;
-
-        Ok((
-            split_files(files, self.options.target_partitions),
-            statistics,
-        ))
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -945,7 +688,6 @@ mod tests {
                         nulls_first: false,
                     },
                 }]))
-
             ),
             // ok with two columns, different options
             (
@@ -969,9 +711,7 @@ mod tests {
                         },
                     },
                 ]))
-
             ),
-
         ];
 
         for (file_sort_order, expected_result) in cases {
@@ -1156,7 +896,7 @@ mod tests {
             12,
             5,
         )
-        .await?;
+            .await?;
 
         // as many expected partitions as files
         assert_list_files_for_scan_grouping(
@@ -1170,7 +910,7 @@ mod tests {
             4,
             4,
         )
-        .await?;
+            .await?;
 
         // more files as expected partitions
         assert_list_files_for_scan_grouping(
@@ -1185,7 +925,7 @@ mod tests {
             2,
             2,
         )
-        .await?;
+            .await?;
 
         // no files => no groups
         assert_list_files_for_scan_grouping(&[], "test:///bucket/key-prefix/", 2, 0)
@@ -1202,7 +942,7 @@ mod tests {
             10,
             2,
         )
-        .await?;
+            .await?;
         Ok(())
     }
 
@@ -1222,7 +962,7 @@ mod tests {
             12,
             5,
         )
-        .await?;
+            .await?;
 
         // as many expected partitions as files
         assert_list_files_for_multi_paths(
@@ -1238,7 +978,7 @@ mod tests {
             5,
             5,
         )
-        .await?;
+            .await?;
 
         // more files as expected partitions
         assert_list_files_for_multi_paths(
@@ -1254,7 +994,7 @@ mod tests {
             2,
             2,
         )
-        .await?;
+            .await?;
 
         // no files => no groups
         assert_list_files_for_multi_paths(&[], &["test:///bucket/key1/"], 2, 0).await?;
@@ -1273,7 +1013,7 @@ mod tests {
             2,
             1,
         )
-        .await?;
+            .await?;
         Ok(())
     }
 

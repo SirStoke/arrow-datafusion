@@ -27,9 +27,6 @@
 
 pub use crate::dataframe::DataFrame;
 pub use crate::execution::context::{SessionConfig, SessionContext};
-pub use crate::execution::options::{
-    AvroReadOptions, CsvReadOptions, NdJsonReadOptions, ParquetReadOptions,
-};
 
 pub use datafusion_common::Column;
 pub use datafusion_expr::{

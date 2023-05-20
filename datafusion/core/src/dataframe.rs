@@ -48,7 +48,6 @@ use crate::logical_expr::{
     col, utils::find_window_exprs, Expr, JoinType, LogicalPlan, LogicalPlanBuilder,
     Partitioning, TableType,
 };
-use crate::physical_plan::file_format::{plan_to_csv, plan_to_json, plan_to_parquet};
 use crate::physical_plan::SendableRecordBatchStream;
 use crate::physical_plan::{collect, collect_partitioned};
 use crate::physical_plan::{execute_stream, execute_stream_partitioned, ExecutionPlan};
@@ -937,31 +936,6 @@ impl DataFrame {
             self.session_state,
             LogicalPlanBuilder::except(left_plan, right_plan, true)?,
         ))
-    }
-
-    /// Write a `DataFrame` to a CSV file.
-    pub async fn write_csv(self, path: &str) -> Result<()> {
-        let plan = self.session_state.create_physical_plan(&self.plan).await?;
-        let task_ctx = Arc::new(self.task_ctx());
-        plan_to_csv(task_ctx, plan, path).await
-    }
-
-    /// Write a `DataFrame` to a Parquet file.
-    pub async fn write_parquet(
-        self,
-        path: &str,
-        writer_properties: Option<WriterProperties>,
-    ) -> Result<()> {
-        let plan = self.session_state.create_physical_plan(&self.plan).await?;
-        let task_ctx = Arc::new(self.task_ctx());
-        plan_to_parquet(task_ctx, plan, path, writer_properties).await
-    }
-
-    /// Executes a query and writes the results to a partitioned JSON file.
-    pub async fn write_json(self, path: impl AsRef<str>) -> Result<()> {
-        let plan = self.session_state.create_physical_plan(&self.plan).await?;
-        let task_ctx = Arc::new(self.task_ctx());
-        plan_to_json(task_ctx, plan, path).await
     }
 
     /// Add an additional column to the DataFrame.

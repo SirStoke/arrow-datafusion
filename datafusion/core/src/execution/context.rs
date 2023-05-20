@@ -21,7 +21,6 @@ use crate::{
     datasource::{
         datasource::TableProviderFactory,
         listing::{ListingOptions, ListingTable},
-        listing_table_factory::ListingTableFactory,
     },
     datasource::{MemTable, ViewTable},
     logical_expr::{PlanType, ToStringifiedPlan},
@@ -78,7 +77,6 @@ use crate::physical_optimizer::repartition::Repartition;
 use crate::config::ConfigOptions;
 use crate::execution::{runtime_env::RuntimeEnv, FunctionRegistry};
 use crate::physical_optimizer::dist_enforcement::EnforceDistribution;
-use crate::physical_plan::file_format::{plan_to_csv, plan_to_json, plan_to_parquet};
 use crate::physical_plan::planner::DefaultPhysicalPlanner;
 use crate::physical_plan::udaf::AggregateUDF;
 use crate::physical_plan::udf::ScalarUDF;
@@ -96,8 +94,6 @@ use parquet::file::properties::WriterProperties;
 use url::Url;
 
 use crate::catalog::information_schema::{InformationSchemaProvider, INFORMATION_SCHEMA};
-use crate::catalog::listing_schema::ListingSchemaProvider;
-use crate::datasource::object_store::ObjectStoreUrl;
 use crate::execution::memory_pool::MemoryPool;
 use crate::physical_optimizer::global_sort_selection::GlobalSortSelection;
 use crate::physical_optimizer::pipeline_checker::PipelineChecker;
@@ -106,10 +102,6 @@ use crate::physical_optimizer::sort_enforcement::EnforceSorting;
 use datafusion_optimizer::OptimizerConfig;
 use datafusion_sql::planner::object_name_to_table_reference;
 use uuid::Uuid;
-
-use super::options::{
-    AvroReadOptions, CsvReadOptions, NdJsonReadOptions, ParquetReadOptions, ReadOptions,
-};
 
 /// DataFilePaths adds a method to convert strings and vector of strings to vector of [`ListingTableUrl`] URLs.
 /// This allows methods such [`SessionContext::read_csv`] and `[`SessionContext::read_avro`]
@@ -211,23 +203,7 @@ impl SessionContext {
         Self::with_config(SessionConfig::new())
     }
 
-    /// Finds any [`ListingSchemaProvider`]s and instructs them to reload tables from "disk"
     pub async fn refresh_catalogs(&self) -> Result<()> {
-        let cat_names = self.catalog_names().clone();
-        for cat_name in cat_names.iter() {
-            let cat = self.catalog(cat_name.as_str()).ok_or_else(|| {
-                DataFusionError::Internal("Catalog not found!".to_string())
-            })?;
-            for schema_name in cat.schema_names() {
-                let schema = cat.schema(schema_name.as_str()).ok_or_else(|| {
-                    DataFusionError::Internal("Schema not found!".to_string())
-                })?;
-                let lister = schema.as_any().downcast_ref::<ListingSchemaProvider>();
-                if let Some(lister) = lister {
-                    lister.refresh(&self.state()).await?;
-                }
-            }
-        }
         Ok(())
     }
 
@@ -674,104 +650,12 @@ impl SessionContext {
             .insert(f.name.clone(), Arc::new(f));
     }
 
-    /// Creates a [`DataFrame`] for reading a data source.
-    ///
-    /// For more control such as reading multiple files, you can use
-    /// [`read_table`](Self::read_table) with a [`ListingTable`].
-    async fn _read_type<'a, P: DataFilePaths>(
-        &self,
-        table_paths: P,
-        options: impl ReadOptions<'a>,
-    ) -> Result<DataFrame> {
-        let table_paths = table_paths.to_urls()?;
-        let session_config = self.copied_config();
-        let listing_options = options.to_listing_options(&session_config);
-        let resolved_schema = options
-            .get_resolved_schema(&session_config, self.state(), table_paths[0].clone())
-            .await?;
-        let config = ListingTableConfig::new_with_multi_paths(table_paths)
-            .with_listing_options(listing_options)
-            .with_schema(resolved_schema);
-        let provider = ListingTable::try_new(config)?;
-        self.read_table(Arc::new(provider))
-    }
-
-    /// Creates a [`DataFrame`] for reading an Avro data source.
-    ///
-    /// For more control such as reading multiple files, you can use
-    /// [`read_table`](Self::read_table) with a [`ListingTable`].
-    ///
-    /// For an example, see [`read_csv`](Self::read_csv)
-    pub async fn read_avro<P: DataFilePaths>(
-        &self,
-        table_paths: P,
-        options: AvroReadOptions<'_>,
-    ) -> Result<DataFrame> {
-        self._read_type(table_paths, options).await
-    }
-
-    /// Creates a [`DataFrame`] for reading an JSON data source.
-    ///
-    /// For more control such as reading multiple files, you can use
-    /// [`read_table`](Self::read_table) with a [`ListingTable`].
-    ///
-    /// For an example, see [`read_csv`](Self::read_csv)
-    pub async fn read_json<P: DataFilePaths>(
-        &self,
-        table_paths: P,
-        options: NdJsonReadOptions<'_>,
-    ) -> Result<DataFrame> {
-        self._read_type(table_paths, options).await
-    }
-
     /// Creates an empty DataFrame.
     pub fn read_empty(&self) -> Result<DataFrame> {
         Ok(DataFrame::new(
             self.state(),
             LogicalPlanBuilder::empty(true).build()?,
         ))
-    }
-
-    /// Creates a [`DataFrame`] for reading a CSV data source.
-    ///
-    /// For more control such as reading multiple files, you can use
-    /// [`read_table`](Self::read_table) with a [`ListingTable`].
-    ///
-    /// Example usage is given below:
-    ///
-    /// ```
-    /// use datafusion::prelude::*;
-    /// # use datafusion::error::Result;
-    /// # #[tokio::main]
-    /// # async fn main() -> Result<()> {
-    /// let ctx = SessionContext::new();
-    /// // You can read a single file using `read_csv`
-    /// let df = ctx.read_csv("tests/data/example.csv", CsvReadOptions::new()).await?;
-    /// // you can also read multiple files:
-    /// let df = ctx.read_csv(vec!["tests/data/example.csv", "tests/data/example.csv"], CsvReadOptions::new()).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn read_csv<P: DataFilePaths>(
-        &self,
-        table_paths: P,
-        options: CsvReadOptions<'_>,
-    ) -> Result<DataFrame> {
-        self._read_type(table_paths, options).await
-    }
-
-    /// Creates a [`DataFrame`] for reading a Parquet data source.
-    ///
-    /// For more control such as reading multiple files, you can use
-    /// [`read_table`](Self::read_table) with a [`ListingTable`].
-    ///
-    /// For an example, see [`read_csv`](Self::read_csv)
-    pub async fn read_parquet<P: DataFilePaths>(
-        &self,
-        table_paths: P,
-        options: ParquetReadOptions<'_>,
-    ) -> Result<DataFrame> {
-        self._read_type(table_paths, options).await
     }
 
     /// Creates a [`DataFrame`] for a [`TableProvider`] such as a
@@ -796,122 +680,6 @@ impl SessionContext {
             )?
             .build()?,
         ))
-    }
-
-    /// Registers a [`ListingTable]` that can assemble multiple files
-    /// from locations in an [`ObjectStore`] instance into a single
-    /// table.
-    ///
-    /// This method is `async` because it might need to resolve the schema.
-    ///
-    /// [`ObjectStore`]: object_store::ObjectStore
-    pub async fn register_listing_table(
-        &self,
-        name: &str,
-        table_path: impl AsRef<str>,
-        options: ListingOptions,
-        provided_schema: Option<SchemaRef>,
-        sql_definition: Option<String>,
-    ) -> Result<()> {
-        let table_path = ListingTableUrl::parse(table_path)?;
-        let resolved_schema = match (provided_schema, options.infinite_source) {
-            (Some(s), _) => s,
-            (None, false) => options.infer_schema(&self.state(), &table_path).await?,
-            (None, true) => {
-                return Err(DataFusionError::Plan(
-                    "Schema inference for infinite data sources is not supported."
-                        .to_string(),
-                ))
-            }
-        };
-        let config = ListingTableConfig::new(table_path)
-            .with_listing_options(options)
-            .with_schema(resolved_schema);
-        let table = ListingTable::try_new(config)?.with_definition(sql_definition);
-        self.register_table(
-            TableReference::Bare { table: name.into() },
-            Arc::new(table),
-        )?;
-        Ok(())
-    }
-
-    /// Registers a CSV file as a table which can referenced from SQL
-    /// statements executed against this context.
-    pub async fn register_csv(
-        &self,
-        name: &str,
-        table_path: &str,
-        options: CsvReadOptions<'_>,
-    ) -> Result<()> {
-        let listing_options = options.to_listing_options(&self.copied_config());
-
-        self.register_listing_table(
-            name,
-            table_path,
-            listing_options,
-            options.schema.map(|s| Arc::new(s.to_owned())),
-            None,
-        )
-        .await?;
-
-        Ok(())
-    }
-
-    /// Registers a JSON file as a table that it can be referenced
-    /// from SQL statements executed against this context.
-    pub async fn register_json(
-        &self,
-        name: &str,
-        table_path: &str,
-        options: NdJsonReadOptions<'_>,
-    ) -> Result<()> {
-        let listing_options = options.to_listing_options(&self.copied_config());
-
-        self.register_listing_table(
-            name,
-            table_path,
-            listing_options,
-            options.schema.map(|s| Arc::new(s.to_owned())),
-            None,
-        )
-        .await?;
-        Ok(())
-    }
-
-    /// Registers a Parquet file as a table that can be referenced from SQL
-    /// statements executed against this context.
-    pub async fn register_parquet(
-        &self,
-        name: &str,
-        table_path: &str,
-        options: ParquetReadOptions<'_>,
-    ) -> Result<()> {
-        let listing_options = options.to_listing_options(&self.state.read().config);
-
-        self.register_listing_table(name, table_path, listing_options, None, None)
-            .await?;
-        Ok(())
-    }
-
-    /// Registers an Avro file as a table that can be referenced from
-    /// SQL statements executed against this context.
-    pub async fn register_avro(
-        &self,
-        name: &str,
-        table_path: &str,
-        options: AvroReadOptions<'_>,
-    ) -> Result<()> {
-        let listing_options = options.to_listing_options(&self.copied_config());
-
-        self.register_listing_table(
-            name,
-            table_path,
-            listing_options,
-            options.schema.map(|s| Arc::new(s.to_owned())),
-            None,
-        )
-        .await?;
-        Ok(())
     }
 
     /// Registers a named catalog using a custom `CatalogProvider` so that
@@ -1066,33 +834,6 @@ impl SessionContext {
         self.state().create_physical_plan(logical_plan).await
     }
 
-    /// Executes a query and writes the results to a partitioned CSV file.
-    pub async fn write_csv(
-        &self,
-        plan: Arc<dyn ExecutionPlan>,
-        path: impl AsRef<str>,
-    ) -> Result<()> {
-        plan_to_csv(self.task_ctx(), plan, path).await
-    }
-
-    /// Executes a query and writes the results to a partitioned JSON file.
-    pub async fn write_json(
-        &self,
-        plan: Arc<dyn ExecutionPlan>,
-        path: impl AsRef<str>,
-    ) -> Result<()> {
-        plan_to_json(self.task_ctx(), plan, path).await
-    }
-
-    /// Executes a query and writes the results to a partitioned Parquet file.
-    pub async fn write_parquet(
-        &self,
-        plan: Arc<dyn ExecutionPlan>,
-        path: impl AsRef<str>,
-        writer_properties: Option<WriterProperties>,
-    ) -> Result<()> {
-        plan_to_parquet(self.task_ctx(), plan, path, writer_properties).await
-    }
 
     /// Get a new TaskContext to run in this session
     pub fn task_ctx(&self) -> Arc<TaskContext> {
@@ -1561,38 +1302,6 @@ impl SessionState {
     ) -> Self {
         let session_id = Uuid::new_v4().to_string();
 
-        // Create table_factories for all default formats
-        let mut table_factories: HashMap<String, Arc<dyn TableProviderFactory>> =
-            HashMap::new();
-        table_factories.insert("PARQUET".into(), Arc::new(ListingTableFactory::new()));
-        table_factories.insert("CSV".into(), Arc::new(ListingTableFactory::new()));
-        table_factories.insert("JSON".into(), Arc::new(ListingTableFactory::new()));
-        table_factories.insert("NDJSON".into(), Arc::new(ListingTableFactory::new()));
-        table_factories.insert("AVRO".into(), Arc::new(ListingTableFactory::new()));
-
-        if config.create_default_catalog_and_schema() {
-            let default_catalog = MemoryCatalogProvider::new();
-
-            default_catalog
-                .register_schema(
-                    &config.config_options().catalog.default_schema,
-                    Arc::new(MemorySchemaProvider::new()),
-                )
-                .expect("memory catalog provider can register schema");
-
-            Self::register_default_schema(
-                &config,
-                &table_factories,
-                &runtime,
-                &default_catalog,
-            );
-
-            catalog_list.register_catalog(
-                config.config_options().catalog.default_catalog.clone(),
-                Arc::new(default_catalog),
-            );
-        }
-
         // We need to take care of the rule ordering. They may influence each other.
         let physical_optimizers: Vec<Arc<dyn PhysicalOptimizerRule + Sync + Send>> = vec![
             Arc::new(AggregateStatistics::new()),
@@ -1654,54 +1363,8 @@ impl SessionState {
             config,
             execution_props: ExecutionProps::new(),
             runtime_env: runtime,
-            table_factories,
+            table_factories: HashMap::new()
         }
-    }
-
-    fn register_default_schema(
-        config: &SessionConfig,
-        table_factories: &HashMap<String, Arc<dyn TableProviderFactory>>,
-        runtime: &Arc<RuntimeEnv>,
-        default_catalog: &MemoryCatalogProvider,
-    ) {
-        let url = config.options.catalog.location.as_ref();
-        let format = config.options.catalog.format.as_ref();
-        let (url, format) = match (url, format) {
-            (Some(url), Some(format)) => (url, format),
-            _ => return,
-        };
-        let url = url.to_string();
-        let format = format.to_string();
-
-        let has_header = config.options.catalog.has_header;
-        let url = Url::parse(url.as_str()).expect("Invalid default catalog location!");
-        let authority = match url.host_str() {
-            Some(host) => format!("{}://{}", url.scheme(), host),
-            None => format!("{}://", url.scheme()),
-        };
-        let path = &url.as_str()[authority.len()..];
-        let path = object_store::path::Path::parse(path).expect("Can't parse path");
-        let store = ObjectStoreUrl::parse(authority.as_str())
-            .expect("Invalid default catalog url");
-        let store = match runtime.object_store(store) {
-            Ok(store) => store,
-            _ => return,
-        };
-        let factory = match table_factories.get(format.as_str()) {
-            Some(factory) => factory,
-            _ => return,
-        };
-        let schema = ListingSchemaProvider::new(
-            authority,
-            path,
-            factory.clone(),
-            store,
-            format,
-            has_header,
-        );
-        let _ = default_catalog
-            .register_schema("default", Arc::new(schema))
-            .expect("Failed to register default schema");
     }
 
     fn resolve_table_ref<'a>(

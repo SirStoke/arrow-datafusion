@@ -17,5 +17,4 @@
 
 pub mod disk_manager;
 pub mod memory_pool;
-pub mod object_store;
 pub mod registry;
